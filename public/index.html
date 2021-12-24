@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stream Audio and Get Live Speech</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-1BmE4kWBq78iYhFldvKuhfTAU6auU8tT94WrHftjDbrCEXSU1oBoqyl2QvZ6jIW3" crossorigin="anonymous">
+</head>
+<body>
+  <div class="container mx-auto my-4">
+    <h1>Stream Audio and Get Live Speech</h1>
+    <div class="form-group">
+      <label for="name">Name</label>
+      <input type="text" id="name" name="name" class="form-control" />
+    </div>
+    <div class="mt-3">
+      <button type="button" id="startStream" class="btn btn-primary">Start Stream</button>
+    </div>
+    <div class="row mt-3">
+      <div class="col">
+        <h2 class="mb-2">Accurate Speech to Text</h2>
+        <div id="accurateText">
+          <div class="spinner-border d-none" role="status">
+            <span class="visually-hidden">Loading...</span>
+          </div>
+        </div>
+      </div>
+      <div class="col">
+        <h2 class="mb-2">Less Accurate Speech to Text</h2>
+        <div id="lessAccurateText">
+          <div class="spinner-border d-none" role="status">
+            <span class="visually-hidden">Loading...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-ka7Sk0Gln4gmtz2MlQnikT1wXgYsOg+OMhuP+IlRH9sENBO0LRn5q+8nbTov4+1p" crossorigin="anonymous"></script>
+  <script>
+    const nameElement = document.getElementById('name')
+    const startStreamButton = document.getElementById('startStream')
+    const accurateElement = document.getElementById('accurateText')
+    const lessAccurateElement = document.getElementById('lessAccurateText')
+
+    let ws = null
+    let serverws = null
+
+    startStreamButton.addEventListener('click', function () {
+      const name = nameElement.value ? nameElement.value.trim() : ''
+      if (!name) {
+        alert('Name is required')
+        return
+      }
+      startStreamButton.disabled = true
+      //delete previous transcript
+      if (accurateElement.children && accurateElement.children.length > 1) {
+        for (let i = 1; i < accurateElement.children.length; i++) {
+          accurateElement.children[i].remove()
+        }
+      }
+      accurateElement.firstElementChild.classList.remove('d-none')
+
+      if (lessAccurateElement.children && lessAccurateElement.children.length > 1) {
+        for (let i = 1; i < lessAccurateElement.children.length; i++) {
+          lessAccurateElement.children[i].remove()
+        }
+      }
+      lessAccurateElement.firstElementChild.classList.remove('d-none')
+      //send a request to the server
+      fetch('/authentication')
+      .then(response => response.json())
+      .then((data) => {
+        if (data.success) {
+          const accessToken = data.accessToken
+          const uniqueMeetingId = btoa(name)
+
+          ws = new WebSocket(`wss://api.symbl.ai/v1/realtime/insights/${uniqueMeetingId}?access_token=${accessToken}`)
+          ws.onmessage = (event) => {
+            if (!serverws) {
+              serverws = new WebSocket('ws://localhost:8080/')
+              const context = new AudioContext()
+              let startTime = 0
+              
+              serverws.onmessage = async (serverEvent) => {
+                    context.decodeAudioData(toArrayBuffer(serverEvent.data))
+                    .then((buffer) => {
+                      const source = context.createBufferSource()
+                      source.buffer = buffer
+                      source.connect(context.destination)
+                      source.start(startTime)
+                      startTime += buffer.duration
+                      // convert to 16-bit payload
+                      const inputData = buffer.getChannelData(0) || new Float32Array(buffer.length);
+                      const targetBuffer = new Int16Array(inputData.length);
+                      for (let index = inputData.length; index > 0; index--) {
+                          targetBuffer[index] = 32767 * Math.min(1, inputData[index]);
+                      }
+                      // Send audio stream to websocket.
+                      if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(targetBuffer.buffer);
+                      }
+                    })
+                    .catch((e) => console.error(e, e.message))
+              }
+            }
+            
+            const data = JSON.parse(event.data)
+            if (data.type === 'message_response') {
+              accurateElement.firstElementChild.classList.add('d-none')
+              for (let message of data.messages) {
+                const p = document.createElement('p')
+                p.innerText = message.payload.content
+                accurateElement.appendChild(p)
+              }
+
+              ws.send(JSON.stringify({
+                "type": "stop_request"
+              }))
+            }
+            
+            if (data.type === 'message' && data.message.hasOwnProperty('punctuated')) {
+              lessAccurateElement.firstElementChild.classList.add('d-none')
+              const p = document.createElement('p')
+              p.innerText = (data.message.isFinal ? 'Final: ' : '') + data.message.punctuated.transcript
+              lessAccurateElement.appendChild(p)
+            }
+          }
+
+          ws.onerror  = (err) => {
+            console.error(err)
+          }
+
+          ws.onclose = (event) => {
+            console.info('Connection to websocket closed')
+            ws = null
+            serverws = null
+            startStreamButton.disabled = false
+          }
+
+          ws.onopen = (event) => {
+            ws.send(JSON.stringify({
+              type: 'start_request',
+              meetingTitle: name,
+              config: {
+                speechRecognition: {
+                  encoding: 'LINEAR16',
+                  sampleRateHertz: 44100,
+                }
+              }
+            }))
+          }  
+
+        } else {
+          alert(data.message ? data.message : 'An error occurred, please try again later')
+          startStreamButton.disabled = false
+        }
+      })
+      .catch((err) => {
+        alert(err.message)
+        startStreamButton.disabled = false
+      })
+    })
+
+    function toArrayBuffer(base64) {
+      var binary_string = window.atob(base64);
+      var len = binary_string.length;
+      var bytes = new Uint8Array(len);
+      for (var i = 0; i < len; i++) {
+          bytes[i] = binary_string.charCodeAt(i);
+      }
+      return bytes.buffer;
+    }
+  </script>
+</body>
+</html>
