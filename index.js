@@ -36,10 +36,7 @@ const wss = new WebSocketServer({
 })
 
 wss.on('connection', function connection(ws) {
-  const readStream = fs.createReadStream("audio/audio.mp3", {
-    'encoding': 'base64',
-    highWaterMark: 8192
-  });
+  const readStream = fs.createReadStream("audio/audio.mp3");
   readStream.on('data', function(data) {
       ws.send(data)
   })

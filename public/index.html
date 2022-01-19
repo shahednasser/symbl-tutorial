@@ -61,10 +61,8 @@
       }
       accurateElement.firstElementChild.classList.remove('d-none')
 
-      if (lessAccurateElement.children && lessAccurateElement.children.length > 1) {
-        for (let i = 1; i < lessAccurateElement.children.length; i++) {
-          lessAccurateElement.children[i].remove()
-        }
+      while(lessAccurateElement.children && lessAccurateElement.children.length > 1) {
+        lessAccurateElement.children[1].remove()
       }
       lessAccurateElement.firstElementChild.classList.remove('d-none')
       //send a request to the server
@@ -79,29 +77,55 @@
           ws.onmessage = (event) => {
             if (!serverws) {
               serverws = new WebSocket('ws://localhost:8080/')
-              const context = new AudioContext()
+              serverws.binaryType = 'arraybuffer'
               let startTime = 0
+              const context = new AudioContext()
               
               serverws.onmessage = async (serverEvent) => {
-                    context.decodeAudioData(toArrayBuffer(serverEvent.data))
-                    .then((buffer) => {
-                      const source = context.createBufferSource()
-                      source.buffer = buffer
-                      source.connect(context.destination)
-                      source.start(startTime)
-                      startTime += buffer.duration
-                      // convert to 16-bit payload
-                      const inputData = buffer.getChannelData(0) || new Float32Array(buffer.length);
-                      const targetBuffer = new Int16Array(inputData.length);
-                      for (let index = inputData.length; index > 0; index--) {
-                          targetBuffer[index] = 32767 * Math.min(1, inputData[index]);
+                const audioBuffer = serverEvent.data
+                const blob = new Blob([audioBuffer], {type: 'audio/mp3'})
+                const file = new File([blob], "test.mp3", {type: 'audio/mp3'})
+                const audio = new Audio(URL.createObjectURL(file))
+                
+                const source = context.createMediaElementSource(audio)
+                const processor = context.createScriptProcessor(1024, 1, 1)
+                processor.onaudioprocess = (e) => {
+                  if (ws) {
+                    let buffer = e
+                    if (e.inputBuffer) {
+                      buffer = e.inputBuffer
+                    }
+                    // convert to 16-bit payload
+                    const inputData = buffer.getChannelData(0) || new Float32Array(this.bufferSize)
+                    const targetBuffer = new Int16Array(inputData.length)
+                    for (let index = inputData.length; index > 0; index--) {
+                      targetBuffer[index] = 32767 * Math.min(1, inputData[index])
+                    }
+                    // Send audio stream to websocket.
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(targetBuffer.buffer)
+                    }
+                    const inputBuffer = e.inputBuffer
+                    const outputBuffer = e.outputBuffer
+
+                    // Loop through the output channels (in this case there is only one)
+                    for (let channel = 0; channel < outputBuffer.numberOfChannels; channel++) {
+                      const input = inputBuffer.getChannelData(channel)
+                      const output = outputBuffer.getChannelData(channel)
+
+                      // Loop through the 4096 samples
+                      for (let sample = 0; sample < inputBuffer.length; sample++) {
+                        // make output equal to the same as the input
+                        output[sample] = input[sample]
                       }
-                      // Send audio stream to websocket.
-                      if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(targetBuffer.buffer);
-                      }
-                    })
-                    .catch((e) => console.error(e, e.message))
+                    }
+                  }
+                  return e
+                }
+                source.connect(processor)
+                processor.connect(context.destination)
+
+                audio.play()
               }
             }
             
